@@ -24,24 +24,33 @@ except (ImportError, RuntimeError, OSError):
 
 @dataclass
 class ModelDimensions:
-    n_mels: int
-    n_audio_ctx: int
-    n_audio_state: int
-    n_audio_head: int
-    n_audio_layer: int
-    n_vocab: int
-    n_text_ctx: int
-    n_text_state: int
-    n_text_head: int
-    n_text_layer: int
+    """
+    存储模型各模块的参数尺寸。
+    """
+    n_mels: int           # Mel 频谱图通道数
+    n_audio_ctx: int      # 音频上下文窗口长度
+    n_audio_state: int    # 音频隐藏状态维度
+    n_audio_head: int     # 音频注意力头数
+    n_audio_layer: int    # 音频编码器层数
+    n_vocab: int          # 词表大小
+    n_text_ctx: int       # 文本上下文窗口长度
+    n_text_state: int     # 文本隐藏状态维度
+    n_text_head: int      # 文本注意力头数
+    n_text_layer: int     # 文本解码器层数
 
 
 class LayerNorm(nn.LayerNorm):
+    """
+    自定义 LayerNorm，支持 float16 数据类型。
+    """
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x.float()).type(x.dtype)
 
 
 class Linear(nn.Linear):
+    """
+    自定义线性层，保证权重和偏置的精度与输入一致。
+    """
     def forward(self, x: Tensor) -> Tensor:
         return F.linear(
             x,
@@ -60,7 +69,11 @@ class Conv1d(nn.Conv1d):
 
 
 def sinusoids(length, channels, max_timescale=10000):
-    """Returns sinusoids for positional embedding"""
+    """
+    使用正弦和余弦函数生成位置编码。
+    - `length`: 序列长度。
+    - `channels`: 编码维度。
+    """
     assert channels % 2 == 0
     log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
     inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
@@ -79,7 +92,10 @@ def disable_sdpa():
 
 
 class MultiHeadAttention(nn.Module):
-    use_sdpa = True
+    """
+    实现多头注意力机制，支持键值缓存和可选的标量点积注意力。
+    """
+    use_sdpa = True  # 是否使用标量点积注意力优化版本
 
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
@@ -89,31 +105,28 @@ class MultiHeadAttention(nn.Module):
         self.value = Linear(n_state, n_state)
         self.out = Linear(n_state, n_state)
 
-    def forward(
-        self,
-        x: Tensor,
-        xa: Optional[Tensor] = None,
-        mask: Optional[Tensor] = None,
-        kv_cache: Optional[dict] = None,
-    ):
+    def forward(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None, kv_cache: Optional[dict] = None):
+        """
+        实现前向传播，支持自注意力和交叉注意力。
+        """
         q = self.query(x)
 
+        # 缓存键值对，减少计算
         if kv_cache is None or xa is None or self.key not in kv_cache:
-            # hooks, if installed (i.e. kv_cache is not None), will prepend the cached kv tensors;
-            # otherwise, perform key/value projections for self- or cross-attention as usual.
             k = self.key(x if xa is None else xa)
             v = self.value(x if xa is None else xa)
         else:
-            # for cross-attention, calculate keys and values once and reuse in subsequent calls.
             k = kv_cache[self.key]
             v = kv_cache[self.value]
 
+        # 执行 QKV 注意力计算
         wv, qk = self.qkv_attention(q, k, v, mask)
         return self.out(wv), qk
 
-    def qkv_attention(
-        self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def qkv_attention(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None):
+        """
+        实现注意力权重计算和输出。
+        """
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
         q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
